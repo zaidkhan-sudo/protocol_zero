@@ -20,10 +20,8 @@ export async function GET() {
 
         const db = getAdminDb();
         if (!db) {
-            return NextResponse.json(
-                { error: "Database not configured" },
-                { status: 503 }
-            );
+            // Firestore not configured — return empty sessions instead of 503
+            return NextResponse.json({ sessions: [] });
         }
 
         const snapshot = await db
