@@ -29,7 +29,7 @@ import {
     cleanupSandbox,
     parseGitHubUrl,
     createPullRequest,
-    createBranchViaApi,
+    forkRepo,
     getBotUsername,
     getHealingBranchName,
 } from "./repo-manager";
@@ -113,52 +113,46 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
     const attempts: HealingAttempt[] = [];
     let repoDir = "";
     let branchName = "";
+    let forkOwner = "";
 
     try {
         // ================================================================
-        // PHASE 0: CLONE AND CREATE BRANCH ON ORIGINAL REPO
+        // PHASE 0: FORK → CLONE FORK → CREATE BRANCH ON FORK
         // ================================================================
         emitLog(sessionId, `Starting self-healing for ${repoUrl}`);
         emitLog(sessionId, `Team: ${teamName} | Leader: ${leaderName}`);
 
-        // Clone original repo with token for auth
+        // Step 1: Fork the repo under the bot account
         await updateSessionStatus(sessionId, "cloning");
-        emitStatus(sessionId, "cloning", `Cloning ${repoOwner}/${repoName}...`);
+        emitStatus(sessionId, "cloning", `Forking ${repoOwner}/${repoName}...`);
+        emitLog(sessionId, `🍴 Forking ${repoOwner}/${repoName} under bot account...`);
 
-        repoDir = await cloneRepo(repoUrl, sessionId);
-        emitLog(sessionId, `✅ Repository cloned successfully`);
+        const forkResult = await forkRepo(repoOwner, repoName);
 
-        // Create branch locally with team/leader name
-        branchName = getHealingBranchName(teamName, leaderName);
-        createBranch(repoDir, branchName);
-        emitLog(sessionId, `✅ Local branch created: ${branchName}`);
-
-        // Create branch on original repo via GitHub API
-        emitLog(sessionId, `🔑 Creating branch ${branchName} on ${repoOwner}/${repoName}...`);
-        const branchResult = await createBranchViaApi(repoOwner, repoName, branchName);
-
-        if (branchResult.success) {
-            emitLog(sessionId, `✅ Branch ${branchName} created on ${repoOwner}/${repoName}`);
+        if (forkResult.success) {
+            forkOwner = forkResult.forkOwner;
+            emitLog(sessionId, `✅ Fork ready: ${forkOwner}/${forkResult.forkRepo}`);
         } else {
-            // Branch creation failed — can't proceed
+            // Fork failed — can't proceed without write access somewhere
             const botUser = await getBotUsername();
-            const errorMsg = `Cannot create branch on ${repoOwner}/${repoName}: ${branchResult.error}. ` +
-                `Bot: ${botUser}. The bot token must have write access to this repo. ` +
-                `Add the bot as a collaborator with Write access.`;
+            const errorMsg = `Cannot fork ${repoOwner}/${repoName}: ${forkResult.error}. ` +
+                `Bot: ${botUser}. Ensure the bot token has 'public_repo' or 'repo' scope.`;
             emitLog(sessionId, `❌ ${errorMsg}`);
             emitError(sessionId, errorMsg);
             await updateSessionStatus(sessionId, "failed", errorMsg);
             return;
         }
 
-        // Set up local tracking so git push works
-        try {
-            const { execSync } = require("child_process");
-            execSync(`git -C "${repoDir}" fetch origin`, { stdio: "pipe", timeout: 15000 });
-            execSync(`git -C "${repoDir}" branch --set-upstream-to=origin/${branchName} ${branchName}`, { stdio: "pipe" });
-        } catch {
-            // optional — push --force will still work
-        }
+        // Step 2: Clone the FORK (bot has write access to its own fork)
+        emitStatus(sessionId, "cloning", `Cloning fork ${forkOwner}/${forkResult.forkRepo}...`);
+
+        repoDir = await cloneRepo(repoUrl, sessionId, forkOwner, forkResult.forkRepo);
+        emitLog(sessionId, `✅ Fork cloned successfully`);
+
+        // Step 3: Create branch locally with team/leader name
+        branchName = getHealingBranchName(teamName, leaderName);
+        createBranch(repoDir, branchName);
+        emitLog(sessionId, `✅ Branch created: ${branchName}`);
 
         // Update session with branch info
         await updateSessionField(sessionId, {
@@ -167,6 +161,9 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
             branchName,
             teamName,
             leaderName,
+            forkOwner,
+            forkRepo: forkResult.forkRepo,
+            forkUrl: forkResult.forkUrl,
         });
 
         // ================================================================
@@ -251,7 +248,7 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
 
                 // Create PR
                 await attemptCreatePR(
-                    sessionId, repoDir, repoOwner, repoName, branchName,
+                    sessionId, repoDir, repoOwner, repoName, branchName, forkOwner,
                     score.bugsFixed, score.totalBugs, attempt, score.finalScore
                 );
 
@@ -379,7 +376,7 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
                 emitScore(sessionId, score as unknown as Record<string, unknown>);
 
                 await attemptCreatePR(
-                    sessionId, repoDir, repoOwner, repoName, branchName,
+                    sessionId, repoDir, repoOwner, repoName, branchName, forkOwner,
                     score.bugsFixed, score.totalBugs, attempt, score.finalScore
                 );
 
@@ -535,7 +532,7 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
 
             // Create PR
             await attemptCreatePR(
-                sessionId, repoDir, repoOwner, repoName, branchName,
+                sessionId, repoDir, repoOwner, repoName, branchName, forkOwner,
                 score.bugsFixed, score.totalBugs, MAX_ATTEMPTS, score.finalScore
             );
 
@@ -549,7 +546,7 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
             // Still create PR with partial fixes
             if (score.bugsFixed > 0) {
                 await attemptCreatePR(
-                    sessionId, repoDir, repoOwner, repoName, branchName,
+                    sessionId, repoDir, repoOwner, repoName, branchName, forkOwner,
                     score.bugsFixed, score.totalBugs, MAX_ATTEMPTS, score.finalScore
                 );
             }
@@ -601,15 +598,16 @@ async function attemptCreatePR(
     repoOwner: string,
     repoName: string,
     branchName: string,
+    forkOwner: string,
     bugsFixed: number,
     totalBugs: number,
     attempts: number,
     score: number,
 ): Promise<void> {
-    emitLog(sessionId, `📝 Creating Pull Request (${branchName} → main)...`);
+    emitLog(sessionId, `📝 Creating cross-fork PR: ${forkOwner}:${branchName} → ${repoOwner}/${repoName}:main...`);
 
     const prResult = await createPullRequest(
-        repoDir, repoOwner, repoName, branchName, repoOwner,
+        repoDir, repoOwner, repoName, branchName, forkOwner,
         bugsFixed, totalBugs, attempts, score,
     );
 
