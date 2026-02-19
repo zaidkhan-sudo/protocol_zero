@@ -45,7 +45,7 @@ export default function Header() {
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2">
           <Image
-            src="/zero2.png"
+            src="/zero3.png"
             alt="Protocol Zero Logo"
             width={32}
             height={32}

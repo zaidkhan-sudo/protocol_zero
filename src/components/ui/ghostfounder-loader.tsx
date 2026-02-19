@@ -60,7 +60,7 @@ export function GhostfounderLoader({
                     }}
                 >
                     <Image
-                        src="/zero2.png"
+                        src="/zero3.png"
                         alt="Loading..."
                         width={config.image}
                         height={config.image}
