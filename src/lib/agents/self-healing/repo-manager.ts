@@ -1,19 +1,21 @@
 /**
  * ============================================================================
- * SELF-HEALING AGENT - REPO MANAGER (FORK-BASED)
+ * SELF-HEALING AGENT - REPO MANAGER (FORK-BASED WITH FALLBACK)
  * ============================================================================
- * Handles all Git operations using a FORK-BASED approach:
+ * Handles all Git operations with flexible fork-based approach:
  * 
- * 1. Fork the target repo under the bot account
- * 2. Clone the FORK (bot has full write access)
- * 3. Create branch, fix bugs, commit with [AI-AGENT] prefix
- * 4. Push to the FORK
- * 5. Create cross-fork PR: bot-fork → original repo
+ * 1. Attempt to fork the target repo under the bot account
+ * 2. If fork succeeds: Clone the FORK (bot has full write access)
+ * 3. If fork fails: Work directly with original repo (requires write access)
+ * 4. Create branch, fix bugs, commit with [AI-AGENT] prefix
+ * 5. Push to fork or original repo
+ * 6. Create PR: bot-fork → original repo OR branch → original repo
  * 
- * This allows creating PRs on ANY public repo without 
- * needing the user to authenticate with GitHub.
+ * This allows creating PRs on ANY public repo, with graceful fallback
+ * when forking isn't available.
  * 
  * Requires: GITHUB_BOT_TOKEN in .env (one-time developer setup)
+ * Recommended Scopes: 'public_repo' (for forking) or 'repo' (for direct access)
  */
 
 import { execSync } from "child_process";
@@ -38,7 +40,8 @@ export function getBotToken(): string {
     if (!token) {
         throw new Error(
             "GITHUB_BOT_TOKEN is not set. Add it to your .env file. " +
-            "Create one at: GitHub → Settings → Developer settings → Personal Access Tokens"
+            "Create a token at: GitHub → Settings → Developer settings → Personal Access Tokens (classic). " +
+            "Required scopes: 'public_repo' (for forking) or 'repo' (for full repository access)."
         );
     }
     return token;
@@ -98,8 +101,19 @@ export async function forkRepo(
 
         if (!response.ok && response.status !== 202) {
             const errorData = await response.json().catch(() => ({}));
+            const errorMsg = errorData.message || response.statusText;
+            
+            // Provide helpful context for common errors
+            if (response.status === 403) {
+                throw new Error(
+                    `Fork failed (403): ${errorMsg}. ` +
+                    `GitHub token may lack 'public_repo' or 'repo' scope. ` +
+                    `Go to GitHub Settings → Developer settings → Personal Access Tokens to update.`
+                );
+            }
+            
             throw new Error(
-                `Fork failed (${response.status}): ${errorData.message || response.statusText}`
+                `Fork failed (${response.status}): ${errorMsg}`
             );
         }
 

@@ -1,18 +1,23 @@
 /**
  * ============================================================================
- * SELF-HEALING AGENT - ORCHESTRATOR (FORK-BASED)
+ * SELF-HEALING AGENT - ORCHESTRATOR (FORK-BASED WITH FALLBACK)
  * ============================================================================
  * The main healing loop controller. Coordinates all agents:
- * 1. Fork repo → clone fork → create branch
+ * 1. Fork repo (if possible) → clone fork/repo → create branch
  * 2. Loop up to 5 times:
  *    - Run Scanner to find bugs
  *    - Run Tester to execute tests
  *    - If tests pass → break, report success
  *    - Run Engineer to write fixes
- *    - Commit with [AI-AGENT] prefix, push to fork
- * 3. Create cross-fork PR, calculate score, emit final result
+ *    - Commit with [AI-AGENT] prefix, push
+ * 3. Create PR (cross-fork or same-repo), calculate score, emit final result
  *
  * Uses GITHUB_BOT_TOKEN from .env — fully autonomous, no user auth needed.
+ * 
+ * FALLBACK BEHAVIOR:
+ * - If forking fails (403/token lacks 'public_repo' scope), works directly on the original repo
+ * - Requires token to have 'repo' scope for direct repo operations
+ * - Gracefully handles both forked and non-forked workflows
  */
 
 import {
@@ -98,30 +103,49 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
     let repoDir = "";
     let branchName = "";
     let forkOwner = "";
+    let useFork = false;
+    let forkRepoName = "";
 
     try {
         // ================================================================
-        // PHASE 0: FORK THE REPO
+        // PHASE 0: ATTEMPT TO FORK THE REPO (WITH FALLBACK)
         // ================================================================
         emitLog(sessionId, `Starting self-healing for ${repoUrl}`);
-        emitLog(sessionId, `🍴 Forking repository...`);
+        emitLog(sessionId, `🍴 Attempting to fork repository...`);
         emitStatus(sessionId, "cloning", `Forking ${repoOwner}/${repoName}...`);
 
         const forkResult = await forkRepo(repoOwner, repoName);
-        if (!forkResult.success) {
-            throw new Error(`Failed to fork repo: ${forkResult.error}`);
+        
+        if (forkResult.success) {
+            // Fork succeeded - work with the fork
+            forkOwner = forkResult.forkOwner;
+            forkRepoName = forkResult.forkRepo;
+            useFork = true;
+            emitLog(sessionId, `✅ Forked to ${forkOwner}/${forkRepoName}`);
+        } else {
+            // Fork failed - work directly with original repo
+            emitLog(sessionId, `⚠️ Fork failed: ${forkResult.error}`);
+            emitLog(sessionId, `📌 Falling back to direct repo operations...`);
+            emitLog(sessionId, `ℹ️  Note: GitHub token may lack 'public_repo' scope for forking`);
+            forkOwner = repoOwner; // Use original owner
+            forkRepoName = repoName; // Use original repo
+            useFork = false;
         }
-        forkOwner = forkResult.forkOwner;
-        emitLog(sessionId, `✅ Forked to ${forkOwner}/${forkResult.forkRepo}`);
 
         // ================================================================
-        // PHASE 1: CLONE THE FORK
+        // PHASE 1: CLONE THE REPO (FORK OR ORIGINAL)
         // ================================================================
         await updateSessionStatus(sessionId, "cloning");
-        emitStatus(sessionId, "cloning", `Cloning fork...`);
+        const cloneTarget = useFork ? "fork" : "repository";
+        emitStatus(sessionId, "cloning", `Cloning ${cloneTarget}...`);
 
-        repoDir = await cloneRepo(repoUrl, sessionId, forkResult.forkOwner, forkResult.forkRepo);
-        emitLog(sessionId, `✅ Fork cloned successfully`);
+        repoDir = await cloneRepo(
+            repoUrl, 
+            sessionId, 
+            useFork ? forkOwner : undefined, 
+            useFork ? forkRepoName : undefined
+        );
+        emitLog(sessionId, `✅ ${useFork ? 'Fork' : 'Repository'} cloned successfully`);
 
         // Create branch
         branchName = createBranch(repoDir);
@@ -132,8 +156,8 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
             repoOwner,
             repoName,
             branchName,
-            forkOwner,
-            forkUrl: forkResult.forkUrl,
+            forkOwner: useFork ? forkOwner : undefined,
+            forkUrl: useFork ? `https://github.com/${forkOwner}/${forkRepoName}` : undefined,
         });
 
         // ================================================================
@@ -200,17 +224,32 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
                 await finalizeSession(sessionId, "completed", allBugs, attempts, score);
                 emitScore(sessionId, score as unknown as Record<string, unknown>);
 
-                // Create PR
-                emitLog(sessionId, `📝 Creating Pull Request...`);
-                const prResult = await createPullRequest(
-                    repoDir, repoOwner, repoName, branchName, forkOwner,
-                    score.bugsFixed, score.totalBugs, attempt, score.finalScore
-                );
-                if (prResult.success) {
-                    emitLog(sessionId, `✅ PR created: ${prResult.prUrl}`);
-                    await updateSessionField(sessionId, { prUrl: prResult.prUrl, prNumber: prResult.prNumber });
+                // Create PR (different logic for fork vs direct)
+                if (useFork) {
+                    emitLog(sessionId, `📝 Creating Pull Request from fork...`);
+                    const prResult = await createPullRequest(
+                        repoDir, repoOwner, repoName, branchName, forkOwner,
+                        score.bugsFixed, score.totalBugs, attempt, score.finalScore
+                    );
+                    if (prResult.success) {
+                        emitLog(sessionId, `✅ PR created: ${prResult.prUrl}`);
+                        await updateSessionField(sessionId, { prUrl: prResult.prUrl, prNumber: prResult.prNumber });
+                    } else {
+                        emitLog(sessionId, `⚠️ PR creation failed: ${prResult.error}`);
+                    }
                 } else {
-                    emitLog(sessionId, `⚠️ PR creation failed: ${prResult.error}`);
+                    emitLog(sessionId, `📝 Creating Pull Request from branch...`);
+                    const prResult = await createPullRequest(
+                        repoDir, repoOwner, repoName, branchName, repoOwner,
+                        score.bugsFixed, score.totalBugs, attempt, score.finalScore
+                    );
+                    if (prResult.success) {
+                        emitLog(sessionId, `✅ PR created: ${prResult.prUrl}`);
+                        await updateSessionField(sessionId, { prUrl: prResult.prUrl, prNumber: prResult.prNumber });
+                    } else {
+                        emitLog(sessionId, `⚠️ PR creation failed: ${prResult.error}`);
+                        emitLog(sessionId, `ℹ️  Token may need 'public_repo' or 'repo' scope`);
+                    }
                 }
 
                 emitStatus(sessionId, "completed", `✅ Self-healing complete! Score: ${score.finalScore}/100`);
@@ -392,27 +431,9 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
             await finalizeSession(sessionId, "completed", allBugs, attempts, score);
             emitScore(sessionId, score as unknown as Record<string, unknown>);
 
-            // Create PR
-            emitLog(sessionId, `📝 Creating Pull Request...`);
-            const prResult = await createPullRequest(
-                repoDir, repoOwner, repoName, branchName, forkOwner,
-                score.bugsFixed, score.totalBugs, MAX_ATTEMPTS, score.finalScore
-            );
-            if (prResult.success) {
-                emitLog(sessionId, `✅ PR created: ${prResult.prUrl}`);
-                await updateSessionField(sessionId, { prUrl: prResult.prUrl, prNumber: prResult.prNumber });
-            } else {
-                emitLog(sessionId, `⚠️ PR creation failed: ${prResult.error}`);
-            }
-
-            emitStatus(sessionId, "completed", `✅ Self-healing complete after ${MAX_ATTEMPTS} attempts! Score: ${score.finalScore}/100`);
-        } else {
-            await finalizeSession(sessionId, "failed", allBugs, attempts, score);
-            emitScore(sessionId, score as unknown as Record<string, unknown>);
-
-            // Still create PR with partial fixes
-            if (score.bugsFixed > 0) {
-                emitLog(sessionId, `📝 Creating PR with partial fixes...`);
+            // Create PR (different logic for fork vs direct)
+            if (useFork) {
+                emitLog(sessionId, `📝 Creating Pull Request from fork...`);
                 const prResult = await createPullRequest(
                     repoDir, repoOwner, repoName, branchName, forkOwner,
                     score.bugsFixed, score.totalBugs, MAX_ATTEMPTS, score.finalScore
@@ -422,6 +443,54 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
                     await updateSessionField(sessionId, { prUrl: prResult.prUrl, prNumber: prResult.prNumber });
                 } else {
                     emitLog(sessionId, `⚠️ PR creation failed: ${prResult.error}`);
+                }
+            } else {
+                emitLog(sessionId, `📝 Creating Pull Request from branch...`);
+                const prResult = await createPullRequest(
+                    repoDir, repoOwner, repoName, branchName, repoOwner,
+                    score.bugsFixed, score.totalBugs, MAX_ATTEMPTS, score.finalScore
+                );
+                if (prResult.success) {
+                    emitLog(sessionId, `✅ PR created: ${prResult.prUrl}`);
+                    await updateSessionField(sessionId, { prUrl: prResult.prUrl, prNumber: prResult.prNumber });
+                } else {
+                    emitLog(sessionId, `⚠️ PR creation failed: ${prResult.error}`);
+                    emitLog(sessionId, `ℹ️  Token may need 'public_repo' or 'repo' scope`);
+                }
+            }
+
+            emitStatus(sessionId, "completed", `✅ Self-healing complete after ${MAX_ATTEMPTS} attempts! Score: ${score.finalScore}/100`);
+        } else {
+            await finalizeSession(sessionId, "failed", allBugs, attempts, score);
+            emitScore(sessionId, score as unknown as Record<string, unknown>);
+
+            // Still create PR with partial fixes
+            if (score.bugsFixed > 0) {
+                if (useFork) {
+                    emitLog(sessionId, `📝 Creating PR with partial fixes from fork...`);
+                    const prResult = await createPullRequest(
+                        repoDir, repoOwner, repoName, branchName, forkOwner,
+                        score.bugsFixed, score.totalBugs, MAX_ATTEMPTS, score.finalScore
+                    );
+                    if (prResult.success) {
+                        emitLog(sessionId, `✅ PR created: ${prResult.prUrl}`);
+                        await updateSessionField(sessionId, { prUrl: prResult.prUrl, prNumber: prResult.prNumber });
+                    } else {
+                        emitLog(sessionId, `⚠️ PR creation failed: ${prResult.error}`);
+                    }
+                } else {
+                    emitLog(sessionId, `📝 Creating PR with partial fixes from branch...`);
+                    const prResult = await createPullRequest(
+                        repoDir, repoOwner, repoName, branchName, repoOwner,
+                        score.bugsFixed, score.totalBugs, MAX_ATTEMPTS, score.finalScore
+                    );
+                    if (prResult.success) {
+                        emitLog(sessionId, `✅ PR created: ${prResult.prUrl}`);
+                        await updateSessionField(sessionId, { prUrl: prResult.prUrl, prNumber: prResult.prNumber });
+                    } else {
+                        emitLog(sessionId, `⚠️ PR creation failed: ${prResult.error}`);
+                        emitLog(sessionId, `ℹ️  Token may need 'public_repo' or 'repo' scope`);
+                    }
                 }
             }
 
