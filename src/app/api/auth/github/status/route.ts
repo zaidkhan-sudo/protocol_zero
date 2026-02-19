@@ -9,13 +9,13 @@ import { Octokit } from "@octokit/rest";
 export async function GET() {
   try {
     const { userId } = await auth();
-    
+
     if (!userId) {
       return NextResponse.json({ connected: false }, { status: 401 });
     }
 
     const clerk = await clerkClient();
-    
+
     // Check if user has GitHub connected
     const user = await clerk.users.getUser(userId);
     const githubAccount = user.externalAccounts?.find(
@@ -28,7 +28,7 @@ export async function GET() {
 
     // Try to get the OAuth token to verify it's still valid
     try {
-      const tokens = await clerk.users.getUserOauthAccessToken(userId, "github");
+      const tokens = await clerk.users.getUserOauthAccessToken(userId, "oauth_github");
       if (!tokens.data || tokens.data.length === 0) {
         return NextResponse.json({ connected: false });
       }
@@ -59,8 +59,8 @@ export async function GET() {
  * This endpoint just returns instructions
  */
 export async function DELETE() {
-  return NextResponse.json({ 
-    success: false, 
+  return NextResponse.json({
+    success: false,
     message: "To disconnect GitHub, please go to your account settings in the user menu and manage connected accounts there."
   });
 }
