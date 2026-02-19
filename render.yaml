@@ -1,0 +1,75 @@
+# ============================================================================
+# Render Blueprint - Protocol Zero
+# ============================================================================
+# Deploy as a Docker web service so the Self-Healing sandbox has access to
+# git, npm, and a writable /tmp directory.
+#
+# HOW TO USE:
+#   1. Push this file to your repo
+#   2. Go to https://render.com → New → Blueprint
+#   3. Connect your GitHub repo
+#   4. Render auto-detects this file and creates the service
+#   5. Add environment variables in the Render dashboard
+# ============================================================================
+
+services:
+  - type: web
+    name: protocol-zero
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: oregon
+    plan: starter # starter = $7/mo, has persistent disk + 512MB RAM
+    # Use "standard" ($25/mo) for heavier usage (1GB RAM, more CPU)
+
+    # Health check
+    healthCheckPath: /api/health
+
+    # Auto-deploy on push to main
+    autoDeploy: true
+    branch: main
+
+    # Environment variables (set values in Render Dashboard → Environment)
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3000"
+
+      # ── Required ──
+      - key: GEMINI_API_KEY
+        sync: false # Set manually in dashboard
+      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+
+      # ── Self-Healing (Required for sandbox) ──
+      - key: GITHUB_BOT_TOKEN
+        sync: false
+
+      # ── Firebase (Optional) ──
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: NEXT_PUBLIC_FIREBASE_API_KEY
+        sync: false
+      - key: NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+        sync: false
+      - key: NEXT_PUBLIC_FIREBASE_PROJECT_ID
+        sync: false
+      - key: NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+        sync: false
+      - key: NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+        sync: false
+      - key: NEXT_PUBLIC_FIREBASE_APP_ID
+        sync: false
+
+      # ── App URL ──
+      - key: NEXT_PUBLIC_APP_URL
+        fromService:
+          type: web
+          name: protocol-zero
+          property: host

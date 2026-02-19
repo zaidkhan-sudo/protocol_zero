@@ -17,14 +17,64 @@
 import { execSync } from "child_process";
 import { existsSync, rmSync, mkdirSync } from "fs";
 import path from "path";
+import os from "os";
 
 // ============================================================================
 // CONSTANTS
 // ============================================================================
 
-const SANDBOX_BASE = "/tmp/self-healing";
+/** Cross-platform sandbox directory — uses OS temp on Windows, /tmp on Linux/Docker */
+const SANDBOX_BASE = process.platform === "win32"
+    ? path.join(os.tmpdir(), "self-healing")
+    : "/tmp/self-healing";
 const BRANCH_SUFFIX = "AI_Fix";
 const COMMIT_PREFIX = "[AI-AGENT]";
+
+/** Normalize path for use in git commands (forward slashes work everywhere) */
+function gitPath(p: string): string {
+    return p.replace(/\\/g, "/");
+}
+
+/**
+ * Pre-flight check: verify that git and npm/node are available in PATH
+ * Throws descriptive error if tools are missing
+ */
+export function verifySandboxEnvironment(): { git: boolean; npm: boolean; errors: string[] } {
+    const errors: string[] = [];
+    let git = false;
+    let npm = false;
+
+    try {
+        execSync("git --version", { stdio: "pipe", timeout: 5000 });
+        git = true;
+    } catch {
+        errors.push("'git' is not installed or not in PATH. Install Git: https://git-scm.com/downloads");
+    }
+
+    try {
+        execSync("npm --version", { stdio: "pipe", timeout: 5000 });
+        npm = true;
+    } catch {
+        errors.push("'npm' is not installed or not in PATH. Install Node.js: https://nodejs.org");
+    }
+
+    // Verify sandbox base can be created
+    try {
+        if (!existsSync(SANDBOX_BASE)) {
+            mkdirSync(SANDBOX_BASE, { recursive: true });
+        }
+    } catch (err) {
+        errors.push(`Cannot create sandbox directory '${SANDBOX_BASE}': ${(err as Error).message}`);
+    }
+
+    if (errors.length > 0) {
+        console.error(`[RepoManager] ❌ Sandbox environment check failed:\n${errors.join("\n")}`);
+    } else {
+        console.log(`[RepoManager] ✅ Sandbox environment OK (git: ✓, npm: ✓, dir: ${SANDBOX_BASE})`);
+    }
+
+    return { git, npm, errors };
+}
 
 /**
  * Get the bot token from environment
@@ -245,8 +295,10 @@ export async function cloneRepo(
     }
 
     try {
-        execSync(`git clone --depth=1 "${cloneTarget}" "${sandboxDir}"`, {
-            timeout: 60000,
+        // Normalize paths for cross-platform compatibility
+        const normalizedSandboxDir = sandboxDir.replace(/\\/g, "/");
+        execSync(`git clone --depth=1 "${cloneTarget}" "${normalizedSandboxDir}"`, {
+            timeout: 120000, // 2 min timeout for large repos
             stdio: "pipe",
         });
 
@@ -255,7 +307,7 @@ export async function cloneRepo(
             const { owner, repo } = parseGitHubUrl(repoUrl);
             try {
                 execSync(
-                    `git -C "${sandboxDir}" remote add upstream "https://github.com/${owner}/${repo}.git"`,
+                    `git -C "${gitPath(sandboxDir)}" remote add upstream "https://github.com/${owner}/${repo}.git"`,
                     { stdio: "pipe" }
                 );
             } catch {
@@ -279,12 +331,13 @@ export function createBranch(repoDir: string, branchName: string): string {
     console.log(`[RepoManager] Creating branch: ${branchName}`);
 
     try {
+        const gp = gitPath(repoDir);
         try {
-            execSync(`git -C "${repoDir}" fetch origin ${branchName}`, { stdio: "pipe" });
-            execSync(`git -C "${repoDir}" checkout ${branchName}`, { stdio: "pipe" });
+            execSync(`git -C "${gp}" fetch origin ${branchName}`, { stdio: "pipe" });
+            execSync(`git -C "${gp}" checkout ${branchName}`, { stdio: "pipe" });
             console.log(`[RepoManager] Checked out existing branch: ${branchName}`);
         } catch {
-            execSync(`git -C "${repoDir}" checkout -b ${branchName}`, { stdio: "pipe" });
+            execSync(`git -C "${gp}" checkout -b ${branchName}`, { stdio: "pipe" });
             console.log(`[RepoManager] Created new branch: ${branchName}`);
         }
         return branchName;
@@ -408,21 +461,22 @@ export function commitChanges(repoDir: string, message: string): string | null {
     console.log(`[RepoManager] Committing: ${fullMessage}`);
 
     try {
-        execSync(`git -C "${repoDir}" config user.email "ai-agent@protocol-zero.dev"`, { stdio: "pipe" });
-        execSync(`git -C "${repoDir}" config user.name "Protocol Zero AI Agent"`, { stdio: "pipe" });
-        execSync(`git -C "${repoDir}" add -A`, { stdio: "pipe" });
+        const gp = gitPath(repoDir);
+        execSync(`git -C "${gp}" config user.email "ai-agent@protocol-zero.dev"`, { stdio: "pipe" });
+        execSync(`git -C "${gp}" config user.name "Protocol Zero AI Agent"`, { stdio: "pipe" });
+        execSync(`git -C "${gp}" add -A`, { stdio: "pipe" });
 
         // Check if there are changes
         try {
-            execSync(`git -C "${repoDir}" diff --cached --quiet`, { stdio: "pipe" });
+            execSync(`git -C "${gp}" diff --cached --quiet`, { stdio: "pipe" });
             console.log("[RepoManager] No changes to commit");
             return null;
         } catch {
             // There ARE changes — continue
         }
 
-        execSync(`git -C "${repoDir}" commit -m "${fullMessage.replace(/"/g, '\\"')}"`, { stdio: "pipe" });
-        const sha = execSync(`git -C "${repoDir}" rev-parse HEAD`, { stdio: "pipe" }).toString().trim();
+        execSync(`git -C "${gp}" commit -m "${fullMessage.replace(/"/g, '\\"')}"`, { stdio: "pipe" });
+        const sha = execSync(`git -C "${gp}" rev-parse HEAD`, { stdio: "pipe" }).toString().trim();
         console.log(`[RepoManager] ✅ Committed: ${sha.slice(0, 7)}`);
         return sha;
     } catch (error) {
@@ -437,8 +491,8 @@ export function commitChanges(repoDir: string, message: string): string | null {
 export function pushBranch(repoDir: string, branchName: string): void {
     console.log(`[RepoManager] Pushing branch: ${branchName}`);
     try {
-        execSync(`git -C "${repoDir}" push -u origin ${branchName} --force`, {
-            timeout: 30000,
+        execSync(`git -C "${gitPath(repoDir)}" push -u origin ${branchName} --force`, {
+            timeout: 60000,
             stdio: "pipe",
         });
         console.log(`[RepoManager] ✅ Push successful`);
@@ -453,7 +507,7 @@ export function pushBranch(repoDir: string, branchName: string): void {
  * Get the HEAD commit SHA
  */
 export function getLatestCommitSha(repoDir: string): string {
-    return execSync(`git -C "${repoDir}" rev-parse HEAD`, { stdio: "pipe" }).toString().trim();
+    return execSync(`git -C "${gitPath(repoDir)}" rev-parse HEAD`, { stdio: "pipe" }).toString().trim();
 }
 
 /**
@@ -461,9 +515,10 @@ export function getLatestCommitSha(repoDir: string): string {
  */
 export function getCommitCount(repoDir: string, branchName: string): number {
     try {
+        const gp = gitPath(repoDir);
         const mainBranch = getDefaultBranch(repoDir);
         const output = execSync(
-            `git -C "${repoDir}" rev-list --count ${mainBranch}..${branchName}`,
+            `git -C "${gp}" rev-list --count ${mainBranch}..${branchName}`,
             { stdio: "pipe" }
         ).toString().trim();
         return parseInt(output, 10) || 0;
@@ -476,15 +531,16 @@ export function getCommitCount(repoDir: string, branchName: string): number {
  * Get the default branch name (main/master)
  */
 export function getDefaultBranch(repoDir: string): string {
+    const gp = gitPath(repoDir);
     try {
         const output = execSync(
-            `git -C "${repoDir}" symbolic-ref refs/remotes/origin/HEAD`,
+            `git -C "${gp}" symbolic-ref refs/remotes/origin/HEAD`,
             { stdio: "pipe" }
         ).toString().trim();
         return output.replace("refs/remotes/origin/", "");
     } catch {
         try {
-            execSync(`git -C "${repoDir}" rev-parse --verify origin/main`, { stdio: "pipe" });
+            execSync(`git -C "${gp}" rev-parse --verify origin/main`, { stdio: "pipe" });
             return "main";
         } catch {
             return "master";

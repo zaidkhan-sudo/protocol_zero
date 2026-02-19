@@ -32,6 +32,7 @@ import {
     forkRepo,
     getBotUsername,
     getHealingBranchName,
+    verifySandboxEnvironment,
 } from "./repo-manager";
 import { runTests, detectTestCommand, installDependencies } from "./test-runner";
 import { scanForBugs } from "./bug-scanner";
@@ -105,6 +106,17 @@ export async function runHealingLoop(input: OrchestratorInput): Promise<void> {
     } catch (error) {
         await updateSessionStatus(sessionId, "failed", (error as Error).message);
         emitError(sessionId, (error as Error).message);
+        removeSessionEmitter(sessionId);
+        return;
+    }
+
+    // Pre-flight: verify git, npm, and sandbox directory are available
+    const envCheck = verifySandboxEnvironment();
+    if (envCheck.errors.length > 0) {
+        const errorMsg = `Sandbox environment check failed:\n${envCheck.errors.join("\n")}`;
+        emitLog(sessionId, `❌ ${errorMsg}`);
+        emitError(sessionId, errorMsg);
+        await updateSessionStatus(sessionId, "failed", errorMsg);
         removeSessionEmitter(sessionId);
         return;
     }

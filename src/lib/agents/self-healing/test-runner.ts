@@ -173,9 +173,11 @@ export function installDependencies(repoDir: string, installCommand: string): vo
     try {
         execSync(cmd, {
             cwd: repoDir,
-            timeout: 60000, // 60s timeout
+            timeout: 180000, // 3 min timeout — large repos need more time
             stdio: "pipe",
             env: { ...process.env, CI: "true" },
+            // Windows needs shell: true for npm commands
+            shell: process.platform === "win32" ? "cmd.exe" : "/bin/sh",
         });
         console.log(`[TestRunner] ✅ Dependencies installed`);
     } catch (error) {
@@ -186,9 +188,10 @@ export function installDependencies(repoDir: string, installCommand: string): vo
             try {
                 execSync("npm install", {
                     cwd: repoDir,
-                    timeout: 60000,
+                    timeout: 180000,
                     stdio: "pipe",
                     env: { ...process.env, CI: "true" },
+                    shell: process.platform === "win32" ? "cmd.exe" : "/bin/sh",
                 });
                 console.log(`[TestRunner] ✅ Dependencies installed (fallback)`);
                 return;
@@ -221,6 +224,7 @@ export function runTests(repoDir: string, skipInstall: boolean = false): TestRes
             cwd: repoDir,
             timeout: 120000, // 2 min timeout
             stdio: "pipe",
+            shell: process.platform === "win32" ? "cmd.exe" : "/bin/sh",
             env: {
                 ...process.env,
                 CI: "true",

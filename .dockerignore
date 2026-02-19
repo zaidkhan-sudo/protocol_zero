@@ -1,0 +1,40 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Build outputs (rebuilt in container)
+.next
+out
+dist
+build
+
+# Version control
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose*.yml
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment (set via Render dashboard)
+.env
+.env.*
+!.env.example
+
+# Hardhat / Blockchain (not needed at runtime)
+artifacts
+cache
+typechain-types
+contracts
+
+# Misc
+README.md
+DEPLOYMENT.md
+*.md
+LICENSE
