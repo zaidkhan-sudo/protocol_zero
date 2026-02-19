@@ -54,3 +54,4 @@ serviceAccount.json
 
 # Local Netlify folder
 .netlify
+.firebaserc
